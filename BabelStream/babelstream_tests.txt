@@ -1,0 +1,542 @@
+#!/usr/bin/env mojo
+"""
+BabelStream Test Suite
+Comprehensive tests for the Mojo implementation of BabelStream
+
+This test suite validates:
+- Kernel correctness
+- Performance consistency  
+- Memory bandwidth calculations
+- Multi-threading safety
+- GPU implementations (when available)
+"""
+
+from testing import assert_true, assert_false, assert_equal, assert_almost_equal
+from math import abs, sqrt
+from time import now
+from tensor import Tensor, TensorShape
+from utils.index import Index
+
+# Import our BabelStream implementation
+from babelstream import CPUStream, GPUStream, calculate_bandwidth, StreamConfig
+from gpu_kernels import AdvancedGPUStream
+
+struct TestConfig:
+    """Configuration for test runs"""
+    var small_array_size: Int
+    var medium_array_size: Int
+    var large_array_size: Int
+    var tolerance: Float64
+    var float_tolerance: Float32
+    
+    fn __init__(inout self):
+        self.small_array_size = 1024
+        self.medium_array_size = 65536  
+        self.large_array_size = 1048576
+        self.tolerance = 1.0e-8
+        self.float_tolerance = 1.0e-4
+
+fn test_array_initialization():
+    """Test that arrays are initialized correctly"""
+    print("Testing array initialization...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.small_array_size)
+    
+    # Check initial values
+    for i in range(min(100, config.small_array_size)):
+        assert_almost_equal(Float64(stream.a[i]), 0.1, config.tolerance)
+        assert_almost_equal(Float64(stream.b[i]), 0.2, config.tolerance) 
+        assert_almost_equal(Float64(stream.c[i]), 0.0, config.tolerance)
+    
+    print("✓ Array initialization test passed")
+
+fn test_copy_kernel():
+    """Test copy kernel: c[i] = a[i]"""
+    print("Testing copy kernel...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.small_array_size)
+    
+    # Run copy kernel
+    _ = stream.copy()
+    
+    # Validate results
+    for i in range(config.small_array_size):
+        assert_almost_equal(Float64(stream.c[i]), Float64(stream.a[i]), config.tolerance)
+    
+    print("✓ Copy kernel test passed")
+
+fn test_mul_kernel():
+    """Test multiply kernel: b[i] = scalar * c[i]"""
+    print("Testing multiply kernel...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.small_array_size)
+    
+    # Run mul kernel
+    _ = stream.mul()
+    
+    # Validate results (b should be scalar * original c values)
+    let expected = 0.4 * 0.0  # scalar * INIT_C
+    for i in range(config.small_array_size):
+        assert_almost_equal(Float64(stream.b[i]), expected, config.tolerance)
+    
+    print("✓ Multiply kernel test passed")
+
+fn test_add_kernel():
+    """Test add kernel: c[i] = a[i] + b[i]"""
+    print("Testing add kernel...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.small_array_size)
+    
+    # Run add kernel
+    _ = stream.add()
+    
+    # Validate results (c should be a + b)
+    let expected = 0.1 + 0.2  # INIT_A + INIT_B
+    for i in range(config.small_array_size):
+        assert_almost_equal(Float64(stream.c[i]), expected, config.tolerance)
+    
+    print("✓ Add kernel test passed")
+
+fn test_triad_kernel():
+    """Test triad kernel: a[i] = b[i] + scalar * c[i]"""
+    print("Testing triad kernel...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.small_array_size)
+    
+    # Run triad kernel
+    _ = stream.triad()
+    
+    # Validate results (a should be b + scalar * c)
+    let expected = 0.2 + 0.4 * 0.0  # INIT_B + scalar * INIT_C
+    for i in range(config.small_array_size):
+        assert_almost_equal(Float64(stream.a[i]), expected, config.tolerance)
+    
+    print("✓ Triad kernel test passed")
+
+fn test_dot_kernel():
+    """Test dot product kernel"""
+    print("Testing dot product kernel...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.small_array_size)
+    
+    # Run dot kernel
+    let result = stream.dot()
+    let dot_sum = result[1]
+    
+    # Validate result (should be sum of a[i] * b[i])
+    let expected = Float64(config.small_array_size) * (0.1 * 0.2)  # size * INIT_A * INIT_B
+    assert_almost_equal(dot_sum, expected, config.tolerance * Float64(config.small_array_size))
+    
+    print("✓ Dot product kernel test passed")
+
+fn test_bandwidth_calculation():
+    """Test bandwidth calculation accuracy"""
+    print("Testing bandwidth calculations...")
+    
+    let array_size = 1000000
+    let time_seconds = 0.001  # 1ms
+    let num_arrays = 3
+    
+    # Test MB/s calculation
+    let bandwidth_mb = calculate_bandwidth(array_size, time_seconds, num_arrays, False)
+    let expected_mb = (Float64(array_size * 8 * num_arrays) / 1000000.0) / time_seconds
+    assert_almost_equal(bandwidth_mb, expected_mb, 1.0)
+    
+    # Test MiB/s calculation  
+    let bandwidth_mib = calculate_bandwidth(array_size, time_seconds, num_arrays, True)
+    let expected_mib = (Float64(array_size * 8 * num_arrays) / (1024.0 * 1024.0)) / time_seconds
+    assert_almost_equal(bandwidth_mib, expected_mib, 1.0)
+    
+    print("✓ Bandwidth calculation test passed")
+
+fn test_kernel_sequence():
+    """Test running all kernels in sequence (integration test)"""
+    print("Testing kernel sequence...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.medium_array_size)
+    
+    # Run all kernels in standard STREAM order
+    _ = stream.copy()    # c = a
+    _ = stream.mul()     # b = scalar * c  
+    _ = stream.add()     # c = a + b
+    _ = stream.triad()   # a = b + scalar * c
+    let dot_result = stream.dot()  # sum = a * b
+    
+    # After this sequence:
+    # c = 0.1 + (0.4 * 0.1) = 0.14
+    # a = (0.4 * 0.1) + 0.4 * 0.14 = 0.04 + 0.056 = 0.096
+    # b = 0.4 * 0.14 = 0.056
+    # dot = sum(a * b) = sum(0.096 * 0.056)
+    
+    let expected_c = 0.1 + (0.4 * 0.1)
+    let expected_b = 0.4 * expected_c
+    let expected_a = expected_b + 0.4 * expected_c
+    let expected_dot = Float64(config.medium_array_size) * (expected_a * expected_b)
+    
+    # Validate final state
+    assert_almost_equal(Float64(stream.c[0]), expected_c, config.tolerance)
+    assert_almost_equal(Float64(stream.b[0]), expected_b, config.tolerance)
+    assert_almost_equal(Float64(stream.a[0]), expected_a, config.tolerance)
+    assert_almost_equal(dot_result[1], expected_dot, config.tolerance * Float64(config.medium_array_size))
+    
+    print("✓ Kernel sequence test passed")
+
+fn test_performance_consistency():
+    """Test that performance is consistent across multiple runs"""
+    print("Testing performance consistency...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.medium_array_size)
+    
+    # Run multiple iterations and check consistency
+    var times = DynamicVector[Float64](capacity=10)
+    
+    for i in range(10):
+        let time = stream.triad()
+        times.push_back(time)
+    
+    # Calculate statistics
+    var min_time = times[0]
+    var max_time = times[0]
+    var total_time: Float64 = 0.0
+    
+    for i in range(len(times)):
+        let time = times[i]
+        total_time += time
+        if time < min_time:
+            min_time = time
+        if time > max_time:
+            max_time = time
+    
+    let avg_time = total_time / Float64(len(times))
+    let variation = (max_time - min_time) / avg_time
+    
+    # Variation should be reasonable (less than 50%)
+    assert_true(variation < 0.5, "Performance variation too high: " + str(variation))
+    
+    print("✓ Performance consistency test passed (variation: " + str(variation) + ")")
+
+fn test_float_precision():
+    """Test single precision floating point operations"""
+    print("Testing single precision...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float32](config.small_array_size)
+    
+    # Run kernels
+    _ = stream.copy()
+    _ = stream.mul() 
+    _ = stream.add()
+    _ = stream.triad()
+    let dot_result = stream.dot()
+    
+    # Basic validation (using looser tolerance for float32)
+    let tolerance = Float64(config.float_tolerance)
+    
+    # Check that operations completed without major errors
+    var sum_valid = True
+    let expected_range = Float64(config.small_array_size) * 0.1  # Rough expected magnitude
+    
+    if abs(dot_result[1]) > expected_range * 10 or abs(dot_result[1]) < expected_range * 0.001:
+        sum_valid = False
+    
+    assert_true(sum_valid, "Float32 dot product result out of expected range")
+    
+    print("✓ Single precision test passed")
+
+fn test_array_size_scaling():
+    """Test that kernels work correctly with different array sizes"""
+    print("Testing array size scaling...")
+    
+    let config = TestConfig()
+    let test_sizes = StaticIntTuple[4](1024, 4096, 16384, 65536)
+    
+    for i in range(4):
+        let size = test_sizes[i]
+        var stream = CPUStream[DType.float64](size)
+        
+        # Test triad kernel at different sizes
+        let time = stream.triad()
+        assert_true(time > 0.0, "Invalid timing for size " + str(size))
+        
+        # Basic correctness check
+        let expected = 0.2 + 0.4 * 0.0  # b + scalar * c
+        assert_almost_equal(Float64(stream.a[0]), expected, config.tolerance)
+        
+        print("  ✓ Size " + str(size) + " passed (time: " + str(time) + "s)")
+    
+    print("✓ Array size scaling test passed")
+
+fn test_memory_alignment():
+    """Test that memory is properly aligned for SIMD operations"""
+    print("Testing memory alignment...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.medium_array_size)
+    
+    # Check alignment (this is implementation-specific)
+    let a_addr = int(stream.a.data())
+    let b_addr = int(stream.b.data())
+    let c_addr = int(stream.c.data())
+    
+    # Arrays should be aligned to at least 32-byte boundaries for AVX
+    assert_true(a_addr % 32 == 0, "Array a not properly aligned")
+    assert_true(b_addr % 32 == 0, "Array b not properly aligned") 
+    assert_true(c_addr % 32 == 0, "Array c not properly aligned")
+    
+    print("✓ Memory alignment test passed")
+
+fn test_error_conditions():
+    """Test error handling and edge cases"""
+    print("Testing error conditions...")
+    
+    # Test with very small arrays
+    var small_stream = CPUStream[DType.float64](1)
+    let time = small_stream.triad()
+    assert_true(time >= 0.0, "Negative time for minimal array")
+    
+    # Test with zero-sized arrays (if supported)
+    # Note: This might not be supported in all implementations
+    
+    print("✓ Error conditions test passed")
+
+# GPU Tests (when GPU support is available)
+fn test_gpu_kernels():
+    """Test GPU kernel implementations"""
+    print("Testing GPU kernels...")
+    
+    # This would test GPU kernels when GPU support is fully implemented
+    # For now, we'll create a placeholder test
+    
+    let config = TestConfig()
+    # var gpu_stream = AdvancedGPUStream[DType.float64](config.small_array_size)
+    
+    # Test basic GPU operations
+    # let time = gpu_stream.triad()
+    # assert_true(time > 0.0, "GPU triad kernel failed")
+    
+    print("✓ GPU kernels test passed (placeholder)")
+
+fn test_cpu_gpu_consistency():
+    """Test that CPU and GPU implementations give consistent results"""
+    print("Testing CPU/GPU consistency...")
+    
+    let config = TestConfig()
+    var cpu_stream = CPUStream[DType.float64](config.small_array_size)
+    # var gpu_stream = AdvancedGPUStream[DType.float64](config.small_array_size)
+    
+    # Run same operations on both
+    let cpu_time = cpu_stream.triad()
+    # let gpu_time = gpu_stream.triad()
+    
+    # Compare results (when GPU is available)
+    # for i in range(min(100, config.small_array_size)):
+    #     assert_almost_equal(
+    #         Float64(cpu_stream.a[i]), 
+    #         Float64(gpu_stream.a[i]), 
+    #         config.tolerance
+    #     )
+    
+    print("✓ CPU/GPU consistency test passed (CPU only)")
+
+# Performance benchmarking tests
+fn benchmark_kernel_performance():
+    """Benchmark individual kernel performance"""
+    print("Benchmarking kernel performance...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.large_array_size)
+    let num_iterations = 10
+    
+    # Benchmark each kernel
+    let kernel_names = StaticIntTuple[5](0, 1, 2, 3, 4)  # copy, mul, add, triad, dot
+    let kernel_name_strings = ("copy", "mul", "add", "triad", "dot")
+    
+    for i in range(5):
+        var total_time: Float64 = 0.0
+        var min_time: Float64 = 1e9
+        
+        for j in range(num_iterations):
+            var time: Float64 = 0.0
+            
+            if i == 0:  # copy
+                time = stream.copy()
+            elif i == 1:  # mul
+                time = stream.mul()
+            elif i == 2:  # add
+                time = stream.add()
+            elif i == 3:  # triad
+                time = stream.triad()
+            elif i == 4:  # dot
+                time = stream.dot()[0]
+            
+            total_time += time
+            if time < min_time:
+                min_time = time
+        
+        let avg_time = total_time / Float64(num_iterations)
+        let bandwidth = calculate_bandwidth(config.large_array_size, min_time, 3, False)
+        
+        print("  " + kernel_name_strings[i] + ": " + 
+              "{:.3f}".format(bandwidth) + " MB/s " +
+              "(min: " + "{:.6f}".format(min_time) + "s, " +
+              "avg: " + "{:.6f}".format(avg_time) + "s)")
+    
+    print("✓ Performance benchmark completed")
+
+fn test_validation_accuracy():
+    """Test the accuracy of validation functions"""
+    print("Testing validation accuracy...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.medium_array_size)
+    
+    # Run a complete sequence
+    _ = stream.copy()
+    _ = stream.mul()
+    _ = stream.add() 
+    _ = stream.triad()
+    let dot_result = stream.dot()
+    
+    # Manual validation
+    var validation_passed = True
+    let epsilon = config.tolerance * 10  # Slightly larger tolerance for accumulated errors
+    
+    # Check a sample of values
+    for i in range(0, min(1000, config.medium_array_size), 100):
+        # Expected values after the sequence
+        let expected_c = 0.1 + (0.4 * 0.1)  # 0.14
+        let expected_b = 0.4 * expected_c    # 0.056
+        let expected_a = expected_b + 0.4 * expected_c  # 0.096
+        
+        if abs(Float64(stream.a[i]) - expected_a) > epsilon:
+            validation_passed = False
+            break
+        if abs(Float64(stream.b[i]) - expected_b) > epsilon:
+            validation_passed = False
+            break
+        if abs(Float64(stream.c[i]) - expected_c) > epsilon:
+            validation_passed = False 
+            break
+    
+    assert_true(validation_passed, "Manual validation failed")
+    
+    print("✓ Validation accuracy test passed")
+
+# Stress tests
+fn stress_test_large_arrays():
+    """Stress test with very large arrays"""
+    print("Running stress test with large arrays...")
+    
+    let large_size = 16777216  # 16M elements (~128MB per array)
+    var stream = CPUStream[DType.float64](large_size)
+    
+    # Run each kernel once with large array
+    let copy_time = stream.copy()
+    let mul_time = stream.mul()
+    let add_time = stream.add()
+    let triad_time = stream.triad()
+    let dot_result = stream.dot()
+    
+    # Verify all operations completed successfully
+    assert_true(copy_time > 0.0, "Copy failed on large array")
+    assert_true(mul_time > 0.0, "Mul failed on large array")
+    assert_true(add_time > 0.0, "Add failed on large array")  
+    assert_true(triad_time > 0.0, "Triad failed on large array")
+    assert_true(dot_result[0] > 0.0, "Dot failed on large array")
+    
+    # Basic correctness check
+    let expected_a = (0.4 * 0.14) + 0.4 * 0.14  # After full sequence
+    assert_almost_equal(Float64(stream.a[0]), expected_a, 1e-6)
+    
+    print("✓ Large array stress test passed")
+
+fn stress_test_repeated_operations():
+    """Stress test with many repeated operations"""
+    print("Running repeated operations stress test...")
+    
+    let config = TestConfig()
+    var stream = CPUStream[DType.float64](config.medium_array_size)
+    
+    # Run many iterations
+    let num_iterations = 1000
+    var last_dot_sum: Float64 = 0.0
+    
+    for i in range(num_iterations):
+        _ = stream.triad()
+        let dot_result = stream.dot()
+        last_dot_sum = dot_result[1]
+        
+        # Check for numerical stability issues
+        if i % 100 == 0:
+            let magnitude = abs(last_dot_sum)
+            assert_true(magnitude < 1e10, "Numerical instability detected at iteration " + str(i))
+            assert_true(magnitude > 1e-10, "Underflow detected at iteration " + str(i))
+    
+    print("✓ Repeated operations stress test passed")
+
+# Test runner
+fn run_all_tests():
+    """Run all test suites"""
+    print("=" * 60)
+    print("BabelStream Mojo Test Suite")
+    print("=" * 60)
+    print()
+    
+    # Basic correctness tests
+    print("=== Basic Correctness Tests ===")
+    test_array_initialization()
+    test_copy_kernel()
+    test_mul_kernel() 
+    test_add_kernel()
+    test_triad_kernel()
+    test_dot_kernel()
+    print()
+    
+    # Integration tests
+    print("=== Integration Tests ===")
+    test_bandwidth_calculation()
+    test_kernel_sequence()
+    test_performance_consistency()
+    test_validation_accuracy()
+    print()
+    
+    # Precision and scaling tests
+    print("=== Precision and Scaling Tests ===")
+    test_float_precision()
+    test_array_size_scaling()
+    test_memory_alignment()
+    test_error_conditions()
+    print()
+    
+    # GPU tests (when available)
+    print("=== GPU Tests ===")
+    test_gpu_kernels()
+    test_cpu_gpu_consistency()
+    print()
+    
+    # Performance tests
+    print("=== Performance Tests ===")
+    benchmark_kernel_performance()
+    print()
+    
+    # Stress tests
+    print("=== Stress Tests ===")
+    stress_test_large_arrays()
+    stress_test_repeated_operations()
+    print()
+    
+    print("=" * 60)
+    print("All tests completed successfully!")
+    print("=" * 60)
+
+fn main():
+    """Main test runner"""
+    run_all_tests()

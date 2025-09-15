@@ -1,0 +1,108 @@
+# BabelStream Mojo Build Configuration
+# This file configures the build system for the Mojo port of BabelStream
+
+[package]
+name = "babelstream-mojo"
+version = "1.0.0"
+description = "Memory bandwidth benchmark suite for Mojo (CPU and GPU)"
+authors = ["Mojo BabelStream Contributors"]
+license = "MIT"
+repository = "https://github.com/your-repo/babelstream-mojo"
+
+[dependencies]
+# Core Mojo standard library dependencies
+mojo-stdlib = ">=24.0.0"
+
+# Optional GPU dependencies (when available)
+mojo-gpu = { version = ">=1.0.0", optional = true }
+mojo-cuda = { version = ">=12.0", optional = true }
+
+[build]
+# Build configuration
+target = "native"
+optimization = "release"
+vectorization = true
+parallelization = true
+
+# CPU-specific optimizations
+[build.cpu]
+simd_width = "auto"  # Automatically detect optimal SIMD width
+target_cpu = "native"  # Optimize for current CPU
+enable_avx512 = true
+enable_fma = true
+
+# GPU-specific configuration (when supported)
+[build.gpu]
+enable_gpu = false  # Set to true when GPU support is available
+cuda_arch = ["sm_70", "sm_75", "sm_80", "sm_86"]  # Support for Volta, Turing, Ampere
+hip_arch = ["gfx906", "gfx908", "gfx90a"]  # AMD GPU architectures
+max_registers_per_thread = 64
+shared_memory_per_block = 49152
+
+# Benchmark configuration
+[benchmark]
+default_array_size = 33554432  # 2^25 elements
+default_iterations = 100
+default_precision = "double"  # or "float"
+enable_validation = true
+enable_csv_output = true
+
+# Performance tuning
+[performance]
+# CPU tuning
+cpu_threads = "auto"  # Number of CPU threads (auto-detect)
+numa_aware = true
+memory_alignment = 64  # Bytes
+
+# GPU tuning (conceptual - for future implementation)
+gpu_block_size = 256
+gpu_grid_size_multiplier = 4
+enable_texture_memory = true
+enable_shared_memory_optimization = true
+
+# Memory configuration
+[memory]
+# Array alignment for optimal SIMD performance
+alignment = 64
+prefetch_distance = 8  # Cache lines
+use_huge_pages = true
+
+# Validation settings
+[validation]
+epsilon_double = 1.0e-8
+epsilon_float = 1.0e-4
+max_validation_elements = 1000  # Only validate first N elements for large arrays
+
+# Output configuration
+[output]
+timing_precision = 5  # Decimal places
+bandwidth_precision = 3
+enable_color_output = true
+show_device_info = true
+
+# Compiler flags for different targets
+[compiler]
+# Release build flags
+release_flags = [
+    "-O3",
+    "-march=native",
+    "-mtune=native",
+    "-ffast-math",
+    "-funroll-loops"
+]
+
+# Debug build flags
+debug_flags = [
+    "-O0",
+    "-g",
+    "-fsanitize=address",
+    "-fsanitize=undefined"
+]
+
+# Profiling flags
+profile_flags = [
+    "-O2",
+    "-g",
+    "-pg",
+    "-fno-omit-frame-pointer"
+]

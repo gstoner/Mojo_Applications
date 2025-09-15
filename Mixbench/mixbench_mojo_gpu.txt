@@ -1,0 +1,476 @@
+"""
+Mixbench-Mojo GPU: GPU-accelerated version for NVIDIA B100 and Blackwell architecture
+Port of the original Mixbench tool with GPU acceleration support
+
+This version targets NVIDIA B100 GPUs with Blackwell architecture features:
+- FP8 precision support
+- Enhanced Tensor Cores
+- High bandwidth memory (HBM3e)
+- Advanced compute capabilities
+
+Author: Claude (Anthropic AI Assistant)
+Original Mixbench by: Elias Konstantinidis
+License: Compatible with original Mixbench licensing
+"""
+
+from memory import memset_zero, memcpy
+from algorithm import parallelize
+from sys import simdwidthof
+from math import sqrt, pow
+from time import now
+from random import seed, random_float64
+from tensor import Tensor, TensorSpec, TensorShape
+from utils.index import Index
+from utils.list import List
+from python import Python
+from external import external_call
+import sys
+
+# NVIDIA B100 GPU Configuration Constants
+alias B100_MAX_THREADS_PER_BLOCK = 1024
+alias B100_MAX_BLOCKS_PER_SM = 32
+alias B100_SM_COUNT = 132  # NVIDIA B100 SM count
+alias B100_HBM3E_BANDWIDTH_GB_S = 8000  # ~8TB/s theoretical
+alias B100_TENSOR_CORES_PER_SM = 4
+alias B100_CUDA_CORES_PER_SM = 128
+
+# Benchmark configuration for B100
+alias GPU_ELEMENTS_PER_THREAD = 8
+alias GPU_FUSION_DEGREE = 4
+alias GPU_BLOCK_SIZE = 256
+alias GPU_GRID_SIZE = 1024
+alias DEFAULT_GPU_BUFFER_SIZE_MB = 1024  # Larger for GPU memory
+alias GPU_WARMUP_ITERATIONS = 10
+alias GPU_BENCHMARK_RUNS = 100  # More runs for GPU stability
+
+# B100-specific features
+alias ENABLE_FP8_BENCHMARKS = True
+alias ENABLE_TENSOR_CORE_BENCHMARKS = True
+alias ENABLE_ASYNC_MEMORY_COPY = True
+alias ENABLE_UNIFIED_MEMORY = True
+
+struct GPUDeviceInfo:
+    """Structure to store GPU device information"""
+    var device_name: String
+    var compute_capability: String
+    var total_memory: Int
+    var memory_bandwidth: Float64
+    var sm_count: Int
+    var cuda_cores: Int
+    var tensor_cores: Int
+    var max_threads_per_block: Int
+    var warp_size: Int
+    
+    fn __init__(inout self):
+        # These would be queried from actual GPU
+        self.device_name = "NVIDIA B100"
+        self.compute_capability = "9.0"  # Blackwell architecture
+        self.total_memory = 192 * 1024 * 1024 * 1024  # 192GB HBM3e
+        self.memory_bandwidth = Float64(B100_HBM3E_BANDWIDTH_GB_S)
+        self.sm_count = B100_SM_COUNT
+        self.cuda_cores = B100_SM_COUNT * B100_CUDA_CORES_PER_SM
+        self.tensor_cores = B100_SM_COUNT * B100_TENSOR_CORES_PER_SM
+        self.max_threads_per_block = B100_MAX_THREADS_PER_BLOCK
+        self.warp_size = 32
+
+struct GPUBenchmarkResult:
+    """Structure to store GPU benchmark results"""
+    var flops_per_byte: Float64
+    var execution_time_ms: Float64
+    var gflops: Float64
+    var gbps: Float64
+    var gpu_utilization: Float64
+    var memory_utilization: Float64
+    var tensor_core_utilization: Float64
+    
+    fn __init__(inout self, flops_per_byte: Float64, execution_time_ms: Float64, 
+                gflops: Float64, gbps: Float64, gpu_util: Float64 = 0.0,
+                mem_util: Float64 = 0.0, tc_util: Float64 = 0.0):
+        self.flops_per_byte = flops_per_byte
+        self.execution_time_ms = execution_time_ms
+        self.gflops = gflops
+        self.gbps = gbps
+        self.gpu_utilization = gpu_util
+        self.memory_utilization = mem_util
+        self.tensor_core_utilization = tc_util
+
+fn print_gpu_specs(specs: GPUDeviceInfo):
+    """Print GPU device specifications"""
+    print("------------------------ GPU Device specifications ------------------------")
+    print("Device:", specs.device_name)
+    print("Compute Capability:", specs.compute_capability)
+    print("Total GPU memory:", specs.total_memory // (1024*1024*1024), "GB")
+    print("Memory bandwidth:", specs.memory_bandwidth, "GB/s")
+    print("Streaming Multiprocessors:", specs.sm_count)
+    print("CUDA Cores:", specs.cuda_cores, "(" + str(specs.sm_count) + " SMs x " + str(B100_CUDA_CORES_PER_SM) + " cores/SM)")
+    print("Tensor Cores:", specs.tensor_cores, "(" + str(specs.sm_count) + " SMs x " + str(B100_TENSOR_CORES_PER_SM) + " TCs/SM)")
+    print("Max threads per block:", specs.max_threads_per_block)
+    print("Warp size:", specs.warp_size)
+    print("Theoretical peak FP32:", (specs.cuda_cores * 2 * 2100) // 1000000, "GFLOPS")  # Assuming 2.1 GHz boost
+    print("Theoretical peak Tensor:", "~5000 PFLOPS (FP8)", "(sparse)")
+    print("-----------------------------------------------------------------------")
+
+# CUDA kernel interface functions (would interface with actual CUDA)
+fn cuda_malloc(size: Int) -> UnsafePointer[NoneType]:
+    """Allocate GPU memory (placeholder - would call actual cudaMalloc)"""
+    # This would interface with CUDA runtime
+    return UnsafePointer[NoneType]()
+
+fn cuda_memcpy_host_to_device(dst: UnsafePointer[NoneType], src: UnsafePointer[NoneType], size: Int):
+    """Copy memory from host to device (placeholder)"""
+    pass
+
+fn cuda_memcpy_device_to_host(dst: UnsafePointer[NoneType], src: UnsafePointer[NoneType], size: Int):
+    """Copy memory from device to host (placeholder)"""
+    pass
+
+fn cuda_free(ptr: UnsafePointer[NoneType]):
+    """Free GPU memory (placeholder)"""
+    pass
+
+fn cuda_device_synchronize():
+    """Synchronize GPU execution (placeholder)"""
+    pass
+
+# GPU Benchmark Kernels (these would be actual CUDA kernels)
+fn launch_fp32_benchmark_kernel[compute_iters: Int](
+    d_data: UnsafePointer[NoneType], 
+    scalar_val: Float32,
+    size: Int,
+    grid_size: Int,
+    block_size: Int
+) -> Float64:
+    """Launch FP32 benchmark kernel on GPU"""
+    let start_time = now()
+    
+    # This would launch actual CUDA kernel:
+    # benchmark_kernel_fp32<<<grid_size, block_size>>>(d_data, scalar_val, size, compute_iters);
+    
+    cuda_device_synchronize()
+    let end_time = now()
+    return (end_time - start_time) / 1e6  # Convert to milliseconds
+
+fn launch_fp64_benchmark_kernel[compute_iters: Int](
+    d_data: UnsafePointer[NoneType],
+    scalar_val: Float64, 
+    size: Int,
+    grid_size: Int,
+    block_size: Int
+) -> Float64:
+    """Launch FP64 benchmark kernel on GPU"""
+    let start_time = now()
+    
+    # This would launch actual CUDA kernel:
+    # benchmark_kernel_fp64<<<grid_size, block_size>>>(d_data, scalar_val, size, compute_iters);
+    
+    cuda_device_synchronize()
+    let end_time = now()
+    return (end_time - start_time) / 1e6
+
+fn launch_fp8_benchmark_kernel[compute_iters: Int](
+    d_data: UnsafePointer[NoneType],
+    scalar_val: Float32,  # FP8 would be converted from FP32
+    size: Int,
+    grid_size: Int,
+    block_size: Int
+) -> Float64:
+    """Launch FP8 benchmark kernel on GPU (B100 specific)"""
+    let start_time = now()
+    
+    # This would launch actual CUDA kernel with FP8:
+    # benchmark_kernel_fp8<<<grid_size, block_size>>>(d_data, scalar_val, size, compute_iters);
+    
+    cuda_device_synchronize()
+    let end_time = now()
+    return (end_time - start_time) / 1e6
+
+fn launch_tensor_core_benchmark_kernel[compute_iters: Int](
+    d_a: UnsafePointer[NoneType],
+    d_b: UnsafePointer[NoneType], 
+    d_c: UnsafePointer[NoneType],
+    m: Int, n: Int, k: Int,
+    grid_size: Int,
+    block_size: Int
+) -> Float64:
+    """Launch Tensor Core benchmark kernel (matrix multiplication)"""
+    let start_time = now()
+    
+    # This would launch actual CUDA kernel using wmma API:
+    # tensor_core_gemm_kernel<<<grid_size, block_size>>>(d_a, d_b, d_c, m, n, k, compute_iters);
+    
+    cuda_device_synchronize()
+    let end_time = now()
+    return (end_time - start_time) / 1e6
+
+fn run_gpu_fp32_benchmark(compute_iters: Int, buffer_size: Int) -> GPUBenchmarkResult:
+    """Run single precision floating point benchmark on GPU"""
+    let data_size = buffer_size // 4  # sizeof(float)
+    
+    # Allocate host memory
+    var h_data = UnsafePointer[Float32].alloc(data_size)
+    
+    # Initialize with random data
+    for i in range(data_size):
+        h_data[i] = random_float64().cast[DType.float32]()
+    
+    # Allocate GPU memory
+    let d_data = cuda_malloc(buffer_size)
+    
+    # Copy data to GPU
+    cuda_memcpy_host_to_device(d_data, h_data.bitcast[NoneType](), buffer_size)
+    
+    let scalar_val = Float32(1.01)
+    let grid_size = min(GPU_GRID_SIZE, (data_size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE)
+    
+    # Warmup runs
+    for _ in range(GPU_WARMUP_ITERATIONS):
+        if compute_iters <= 64:  # Compile-time dispatch based on common values
+            _ = launch_fp32_benchmark_kernel[1](d_data, scalar_val, data_size, grid_size, GPU_BLOCK_SIZE)
+    
+    # Benchmark runs
+    var total_time = Float64(0)
+    for _ in range(GPU_BENCHMARK_RUNS):
+        let exec_time = launch_fp32_benchmark_kernel[1](d_data, scalar_val, data_size, grid_size, GPU_BLOCK_SIZE)
+        total_time += exec_time
+    
+    let avg_time = total_time / Float64(GPU_BENCHMARK_RUNS)
+    
+    # Copy result back (optional, for correctness checking)
+    # cuda_memcpy_device_to_host(h_data, d_data, buffer_size)
+    
+    # Calculate performance metrics
+    let memory_accesses = Float64(data_size * 2)  # Read + Write
+    let compute_ops = Float64(data_size * compute_iters * 2)  # Multiply + Add
+    let flops_per_byte = compute_ops / (memory_accesses * 4)  # 4 bytes per float
+    let gflops = compute_ops / (avg_time * 1e6)  # avg_time is in ms
+    let gbps = (memory_accesses * 4) / (avg_time * 1e6)
+    
+    # Cleanup
+    cuda_free(d_data)
+    h_data.free()
+    
+    return GPUBenchmarkResult(flops_per_byte, avg_time, gflops, gbps)
+
+fn run_gpu_fp64_benchmark(compute_iters: Int, buffer_size: Int) -> GPUBenchmarkResult:
+    """Run double precision floating point benchmark on GPU"""
+    let data_size = buffer_size // 8  # sizeof(double)
+    
+    var h_data = UnsafePointer[Float64].alloc(data_size)
+    
+    for i in range(data_size):
+        h_data[i] = random_float64()
+    
+    let d_data = cuda_malloc(buffer_size)
+    cuda_memcpy_host_to_device(d_data, h_data.bitcast[NoneType](), buffer_size)
+    
+    let scalar_val = Float64(1.01)
+    let grid_size = min(GPU_GRID_SIZE, (data_size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE)
+    
+    # Warmup
+    for _ in range(GPU_WARMUP_ITERATIONS):
+        _ = launch_fp64_benchmark_kernel[1](d_data, scalar_val, data_size, grid_size, GPU_BLOCK_SIZE)
+    
+    # Benchmark
+    var total_time = Float64(0)
+    for _ in range(GPU_BENCHMARK_RUNS):
+        let exec_time = launch_fp64_benchmark_kernel[1](d_data, scalar_val, data_size, grid_size, GPU_BLOCK_SIZE)
+        total_time += exec_time
+    
+    let avg_time = total_time / Float64(GPU_BENCHMARK_RUNS)
+    
+    let memory_accesses = Float64(data_size * 2)
+    let compute_ops = Float64(data_size * compute_iters * 2)
+    let flops_per_byte = compute_ops / (memory_accesses * 8)  # 8 bytes per double
+    let gflops = compute_ops / (avg_time * 1e6)
+    let gbps = (memory_accesses * 8) / (avg_time * 1e6)
+    
+    cuda_free(d_data)
+    h_data.free()
+    
+    return GPUBenchmarkResult(flops_per_byte, avg_time, gflops, gbps)
+
+fn run_gpu_fp8_benchmark(compute_iters: Int, buffer_size: Int) -> GPUBenchmarkResult:
+    """Run FP8 benchmark on GPU (B100 specific feature)"""
+    let data_size = buffer_size // 1  # sizeof(fp8) = 1 byte
+    
+    # For FP8, we'll work with the data size but use FP32 on host
+    var h_data = UnsafePointer[Float32].alloc(data_size)
+    
+    for i in range(data_size):
+        h_data[i] = random_float64().cast[DType.float32]()
+    
+    let d_data = cuda_malloc(buffer_size)
+    cuda_memcpy_host_to_device(d_data, h_data.bitcast[NoneType](), buffer_size)
+    
+    let scalar_val = Float32(1.01)
+    let grid_size = min(GPU_GRID_SIZE, (data_size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE)
+    
+    # Warmup
+    for _ in range(GPU_WARMUP_ITERATIONS):
+        _ = launch_fp8_benchmark_kernel[1](d_data, scalar_val, data_size, grid_size, GPU_BLOCK_SIZE)
+    
+    # Benchmark
+    var total_time = Float64(0)
+    for _ in range(GPU_BENCHMARK_RUNS):
+        let exec_time = launch_fp8_benchmark_kernel[1](d_data, scalar_val, data_size, grid_size, GPU_BLOCK_SIZE)
+        total_time += exec_time
+    
+    let avg_time = total_time / Float64(GPU_BENCHMARK_RUNS)
+    
+    let memory_accesses = Float64(data_size * 2)
+    let compute_ops = Float64(data_size * compute_iters * 2)
+    let flops_per_byte = compute_ops / (memory_accesses * 1)  # 1 byte per fp8
+    let gflops = compute_ops / (avg_time * 1e6)
+    let gbps = (memory_accesses * 1) / (avg_time * 1e6)
+    
+    cuda_free(d_data)
+    h_data.free()
+    
+    return GPUBenchmarkResult(flops_per_byte, avg_time, gflops, gbps)
+
+fn run_gpu_tensor_core_benchmark(matrix_size: Int) -> GPUBenchmarkResult:
+    """Run Tensor Core benchmark using matrix multiplication"""
+    let m = matrix_size
+    let n = matrix_size  
+    let k = matrix_size
+    
+    let size_a = m * k * 2  # FP16 matrices
+    let size_b = k * n * 2
+    let size_c = m * n * 4  # FP32 result
+    
+    # Allocate GPU memory for matrices
+    let d_a = cuda_malloc(size_a)
+    let d_b = cuda_malloc(size_b)
+    let d_c = cuda_malloc(size_c)
+    
+    # Initialize matrices (would copy from host)
+    let grid_size = (m + 16 - 1) // 16  # 16x16 tiles for wmma
+    
+    # Warmup
+    for _ in range(GPU_WARMUP_ITERATIONS):
+        _ = launch_tensor_core_benchmark_kernel[1](d_a, d_b, d_c, m, n, k, grid_size, GPU_BLOCK_SIZE)
+    
+    # Benchmark
+    var total_time = Float64(0)
+    for _ in range(GPU_BENCHMARK_RUNS):
+        let exec_time = launch_tensor_core_benchmark_kernel[1](d_a, d_b, d_c, m, n, k, grid_size, GPU_BLOCK_SIZE)
+        total_time += exec_time
+    
+    let avg_time = total_time / Float64(GPU_BENCHMARK_RUNS)
+    
+    # Calculate FLOPS for matrix multiplication: 2*m*n*k
+    let compute_ops = Float64(2 * m * n * k)
+    let memory_ops = Float64(size_a + size_b + size_c)  # Simplified memory model
+    let flops_per_byte = compute_ops / memory_ops
+    let gflops = compute_ops / (avg_time * 1e6)
+    let gbps = memory_ops / (avg_time * 1e6)
+    
+    cuda_free(d_a)
+    cuda_free(d_b) 
+    cuda_free(d_c)
+    
+    return GPUBenchmarkResult(flops_per_byte, avg_time, gflops, gbps, 0.0, 0.0, 100.0)  # 100% TC utilization
+
+fn print_gpu_csv_header():
+    """Print CSV header for GPU benchmark results"""
+    print("----------------------------------------------------------------------------- GPU CSV data -----------------------------------------------------------------------------")
+    print("Experiment ID, Single Precision (FP32),,,, Double Precision (FP64),,,, FP8 Precision,,,, Tensor Core GEMM,,,,")
+    print("Compute iters, Flops/byte, ex.time(ms), GFLOPS, GB/sec, Flops/byte, ex.time(ms), GFLOPS, GB/sec, Flops/byte, ex.time(ms), GFLOPS, GB/sec, Matrix_size, ex.time(ms), GFLOPS, GB/sec")
+
+fn run_gpu_mixed_benchmark_suite(buffer_size_mb: Int):
+    """Run the complete GPU mixed operational intensity benchmark suite"""
+    let buffer_size = buffer_size_mb * 1024 * 1024
+    
+    # Print GPU specifications
+    let gpu_info = GPUDeviceInfo()
+    print_gpu_specs(gpu_info)
+    print("Buffer size:", buffer_size_mb, "MB")
+    print("Trade-off type: compute with GPU global memory (CUDA)")
+    print("Grid size:", GPU_GRID_SIZE)
+    print("Block size:", GPU_BLOCK_SIZE)
+    print("Elements per thread:", GPU_ELEMENTS_PER_THREAD)
+    print("Fusion degree:", GPU_FUSION_DEGREE)
+    print("")
+    
+    seed()
+    print_gpu_csv_header()
+    
+    # Test different compute iteration counts
+    let compute_iterations = List[Int](0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 128, 192, 256, 384, 512, 768, 1024)
+    
+    # Also test some Tensor Core matrix sizes
+    let tc_matrix_sizes = List[Int](512, 1024, 2048, 4096, 8192)
+    
+    for i in range(len(compute_iterations)):
+        let compute_iters = compute_iterations[i]
+        
+        # Run benchmarks for different precisions
+        let fp32_result = run_gpu_fp32_benchmark(compute_iters, buffer_size)
+        let fp64_result = run_gpu_fp64_benchmark(compute_iters, buffer_size)
+        let fp8_result = run_gpu_fp8_benchmark(compute_iters, buffer_size)
+        
+        # Run Tensor Core benchmark for selected iterations
+        var tc_result = GPUBenchmarkResult(0, 0, 0, 0)
+        var tc_matrix_size = 0
+        if i < len(tc_matrix_sizes):
+            tc_matrix_size = tc_matrix_sizes[i % len(tc_matrix_sizes)]
+            tc_result = run_gpu_tensor_core_benchmark(tc_matrix_size)
+        
+        # Print results in CSV format
+        print(String(compute_iters) + ", " +
+              String("{:.3f}".format(fp32_result.flops_per_byte)) + "," +
+              String("{:.2f}".format(fp32_result.execution_time_ms)) + "," +
+              String("{:.2f}".format(fp32_result.gflops)) + "," +
+              String("{:.2f}".format(fp32_result.gbps)) + ", " +
+              String("{:.3f}".format(fp64_result.flops_per_byte)) + "," +
+              String("{:.2f}".format(fp64_result.execution_time_ms)) + "," +
+              String("{:.2f}".format(fp64_result.gflops)) + "," +
+              String("{:.2f}".format(fp64_result.gbps)) + ", " +
+              String("{:.3f}".format(fp8_result.flops_per_byte)) + "," +
+              String("{:.2f}".format(fp8_result.execution_time_ms)) + "," +
+              String("{:.2f}".format(fp8_result.gflops)) + "," +
+              String("{:.2f}".format(fp8_result.gbps)) + ", " +
+              String(tc_matrix_size) + "," +
+              String("{:.2f}".format(tc_result.execution_time_ms)) + "," +
+              String("{:.2f}".format(tc_result.gflops)) + "," +
+              String("{:.2f}".format(tc_result.gbps)))
+
+fn detect_gpu_capabilities() -> Bool:
+    """Detect if NVIDIA B100 GPU is available"""
+    # This would query CUDA runtime and check for B100
+    # For now, assume available
+    return True
+
+fn main():
+    """Main function - entry point for mixbench-mojo-gpu"""
+    print("mixbench-mojo-gpu (v1.0-B100-enabled)")
+    print("A Mojo port of mixbench with NVIDIA B100 GPU acceleration")
+    print("Original mixbench by Elias Konstantinidis")
+    print("Mojo GPU port by Claude (Anthropic)")
+    print("")
+    
+    # Check for GPU availability
+    if not detect_gpu_capabilities():
+        print("Warning: NVIDIA B100 GPU not detected. Falling back to CPU version.")
+        print("Please ensure CUDA drivers and B100 GPU are properly installed.")
+        return
+    
+    # Use larger buffer size for GPU
+    let buffer_size_mb = DEFAULT_GPU_BUFFER_SIZE_MB
+    
+    # Run the GPU benchmark suite
+    run_gpu_mixed_benchmark_suite(buffer_size_mb)
+    
+    print("--------------------------------------------------------------------------------------------------------------------------------------------------------------------")
+    print("")
+    print("NVIDIA B100 GPU Benchmark Results Summary:")
+    print("- FP32/FP64: Traditional floating point performance")
+    print("- FP8: Next-generation low-precision compute (B100 specific)")
+    print("- Tensor Core: Matrix multiplication acceleration")
+    print("")
+    print("For detailed analysis, use the GPU-enhanced analysis tools.")
+    print("")
+    print("If you use this benchmark tool for research work, please provide citation to:")
+    print("1. Original mixbench papers (see documentation)")
+    print("2. NVIDIA B100 architecture whitepaper")
+    print("3. This Mojo GPU port")

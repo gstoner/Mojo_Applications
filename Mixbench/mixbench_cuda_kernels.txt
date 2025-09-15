@@ -1,0 +1,440 @@
+/**
+ * CUDA kernels for Mixbench-Mojo GPU version
+ * Optimized for NVIDIA B100 Blackwell architecture
+ * 
+ * Features:
+ * - FP32/FP64/FP8 compute kernels
+ * - Tensor Core matrix multiplication
+ * - Memory coalescing optimization
+ * - B100-specific optimizations
+ */
+
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>  // B100 FP8 support
+#include <mma.h>       // Tensor Core operations
+#include <cooperative_groups.h>
+#include <stdio.h>
+
+using namespace nvcuda;
+namespace cg = cooperative_groups;
+
+// B100 specific constants
+#define WARP_SIZE 32
+#define MAX_THREADS_PER_BLOCK 1024
+#define ELEMENTS_PER_THREAD 8
+#define FUSION_DEGREE 4
+
+// FP8 type definitions for B100
+#ifdef __CUDA_ARCH__
+#if __CUDA_ARCH__ >= 900  // Blackwell architecture
+#define FP8_SUPPORTED 1
+#else
+#define FP8_SUPPORTED 0
+#endif
+#endif
+
+/**
+ * Device utility functions
+ */
+__device__ __forceinline__ float make_non_zero(float val) {
+    return (val == 0.0f) ? 1.0f : val;
+}
+
+__device__ __forceinline__ double make_non_zero(double val) {
+    return (val == 0.0) ? 1.0 : val;
+}
+
+/**
+ * FP32 benchmark kernel with variable compute intensity
+ */
+template<int COMPUTE_ITERS>
+__global__ void mixbench_kernel_fp32(float* __restrict__ data, 
+                                    float scalar_val, 
+                                    int size) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    
+    // Each thread processes multiple elements for better memory utilization
+    for (int idx = tid; idx < size; idx += stride) {
+        float val = data[idx];
+        
+        // Unrolled compute loop for better performance
+        #pragma unroll
+        for (int i = 0; i < COMPUTE_ITERS; i++) {
+            val = fmaf(val, scalar_val, scalar_val);  // Fused multiply-add
+        }
+        
+        data[idx] = make_non_zero(val);  // Prevent compiler optimization
+    }
+}
+
+/**
+ * FP64 benchmark kernel with variable compute intensity
+ */
+template<int COMPUTE_ITERS>
+__global__ void mixbench_kernel_fp64(double* __restrict__ data, 
+                                    double scalar_val, 
+                                    int size) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    
+    for (int idx = tid; idx < size; idx += stride) {
+        double val = data[idx];
+        
+        #pragma unroll
+        for (int i = 0; i < COMPUTE_ITERS; i++) {
+            val = fma(val, scalar_val, scalar_val);  // Double precision FMA
+        }
+        
+        data[idx] = make_non_zero(val);
+    }
+}
+
+/**
+ * FP8 benchmark kernel (B100 Blackwell specific)
+ */
+#if FP8_SUPPORTED
+template<int COMPUTE_ITERS>
+__global__ void mixbench_kernel_fp8(__nv_fp8_e4m3* __restrict__ data,
+                                   float scalar_val,
+                                   int size) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    
+    // Convert scalar to FP8 (this would use proper conversion APIs)
+    __nv_fp8_e4m3 scalar_fp8 = __nv_fp8_e4m3(scalar_val);
+    
+    for (int idx = tid; idx < size; idx += stride) {
+        __nv_fp8_e4m3 val = data[idx];
+        
+        #pragma unroll
+        for (int i = 0; i < COMPUTE_ITERS; i++) {
+            // FP8 arithmetic (would use proper B100 FP8 instructions)
+            float temp = (float)val * scalar_val + scalar_val;
+            val = __nv_fp8_e4m3(temp);
+        }
+        
+        data[idx] = val;
+    }
+}
+#endif
+
+/**
+ * Tensor Core GEMM kernel using wmma API
+ * Optimized for B100 4th-gen Tensor Cores
+ */
+template<int TILE_M, int TILE_N, int TILE_K>
+__global__ void mixbench_tensor_core_gemm(const half* __restrict__ A,
+                                         const half* __restrict__ B,
+                                         float* __restrict__ C,
+                                         int M, int N, int K,
+                                         int compute_iters) {
+    // Tensor Core fragment declarations
+    wmma::fragment<wmma::matrix_a, TILE_M, TILE_N, TILE_K, half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, TILE_M, TILE_N, TILE_K, half, wmma::col_major> b_frag;
+    wmma::fragment<wmma::accumulator, TILE_M, TILE_N, TILE_K, float> c_frag;
+    
+    // Warp and block coordinates
+    int warp_m = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
+    int warp_n = (blockIdx.y * blockDim.y + threadIdx.y);
+    
+    // Bounds checking
+    if (warp_m >= M / TILE_M || warp_n >= N / TILE_N) return;
+    
+    // Initialize accumulator fragment to zero
+    wmma::fill_fragment(c_frag, 0.0f);
+    
+    // Perform matrix multiplication with variable compute intensity
+    for (int iter = 0; iter < compute_iters; iter++) {
+        for (int k = 0; k < K; k += TILE_K) {
+            int a_row = warp_m * TILE_M;
+            int a_col = k;
+            int b_row = k;
+            int b_col = warp_n * TILE_N;
+            
+            // Load matrix fragments
+            wmma::load_matrix_sync(a_frag, A + a_row * K + a_col, K);
+            wmma::load_matrix_sync(b_frag, B + b_row * N + b_col, N);
+            
+            // Perform matrix multiplication
+            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        }
+    }
+    
+    // Store result
+    int c_row = warp_m * TILE_M;
+    int c_col = warp_n * TILE_N;
+    wmma::store_matrix_sync(C + c_row * N + c_col, c_frag, N, wmma::mem_row_major);
+}
+
+/**
+ * Advanced memory benchmark kernel with different access patterns
+ */
+template<int COMPUTE_ITERS, int ACCESS_PATTERN>
+__global__ void mixbench_memory_pattern_kernel(float* __restrict__ data,
+                                             float scalar_val,
+                                             int size,
+                                             int stride_size) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+    
+    // Different memory access patterns
+    int idx;
+    switch (ACCESS_PATTERN) {
+        case 0: // Sequential access
+            idx = tid;
+            break;
+        case 1: // Strided access
+            idx = (tid * stride_size) % size;
+            break;
+        case 2: // Random-like access
+            idx = (tid * 1103515245 + 12345) % size;
+            break;
+        default:
+            idx = tid;
+    }
+    
+    if (idx >= size) return;
+    
+    float val = data[idx];
+    
+    // Compute intensive loop
+    #pragma unroll
+    for (int i = 0; i < COMPUTE_ITERS; i++) {
+        val = fmaf(val, scalar_val, scalar_val);
+    }
+    
+    data[idx] = make_non_zero(val);
+}
+
+/**
+ * Multi-precision mixed kernel (B100 specific)
+ * Tests different precisions in the same kernel
+ */
+__global__ void mixbench_mixed_precision_kernel(void* __restrict__ data,
+                                               int size,
+                                               int precision_type,
+                                               int compute_iters) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= size) return;
+    
+    switch (precision_type) {
+        case 0: { // FP32
+            float* fp32_data = (float*)data;
+            float val = fp32_data[tid];
+            for (int i = 0; i < compute_iters; i++) {
+                val = fmaf(val, 1.01f, 1.01f);
+            }
+            fp32_data[tid] = make_non_zero(val);
+            break;
+        }
+        case 1: { // FP64
+            double* fp64_data = (double*)data;
+            double val = fp64_data[tid];
+            for (int i = 0; i < compute_iters; i++) {
+                val = fma(val, 1.01, 1.01);
+            }
+            fp64_data[tid] = make_non_zero(val);
+            break;
+        }
+        case 2: { // FP16
+            half* fp16_data = (half*)data;
+            half val = fp16_data[tid];
+            half scalar = __float2half(1.01f);
+            for (int i = 0; i < compute_iters; i++) {
+                val = __hfma(val, scalar, scalar);
+            }
+            fp16_data[tid] = val;
+            break;
+        }
+#if FP8_SUPPORTED
+        case 3: { // FP8
+            __nv_fp8_e4m3* fp8_data = (__nv_fp8_e4m3*)data;
+            __nv_fp8_e4m3 val = fp8_data[tid];
+            for (int i = 0; i < compute_iters; i++) {
+                float temp = (float)val * 1.01f + 1.01f;
+                val = __nv_fp8_e4m3(temp);
+            }
+            fp8_data[tid] = val;
+            break;
+        }
+#endif
+    }
+}
+
+/**
+ * Cooperative Groups enhanced kernel for B100
+ */
+__global__ void mixbench_cooperative_kernel(float* __restrict__ data,
+                                          float scalar_val,
+                                          int size,
+                                          int compute_iters) {
+    // Create cooperative group
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+    
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= size) return;
+    
+    float val = data[tid];
+    
+    // Perform compute with warp-level synchronization
+    for (int i = 0; i < compute_iters; i++) {
+        val = fmaf(val, scalar_val, scalar_val);
+        
+        // Warp shuffle operations for additional compute
+        if (i % 4 == 0) {
+            val += warp.shfl_xor(val, 1);
+            val *= 0.5f;
+        }
+    }
+    
+    data[tid] = make_non_zero(val);
+}
+
+/**
+ * Host wrapper functions for Mojo interface
+ */
+extern "C" {
+
+// FP32 kernel launcher
+void launch_mixbench_fp32_kernel(float* d_data, float scalar_val, int size, 
+                                int grid_size, int block_size, int compute_iters,
+                                cudaStream_t stream = 0) {
+    // Template dispatch based on compute iterations
+    switch (compute_iters) {
+        case 0: mixbench_kernel_fp32<0><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 1: mixbench_kernel_fp32<1><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 2: mixbench_kernel_fp32<2><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 4: mixbench_kernel_fp32<4><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 8: mixbench_kernel_fp32<8><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 16: mixbench_kernel_fp32<16><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 32: mixbench_kernel_fp32<32><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 64: mixbench_kernel_fp32<64><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 128: mixbench_kernel_fp32<128><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 256: mixbench_kernel_fp32<256><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 512: mixbench_kernel_fp32<512><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 1024: mixbench_kernel_fp32<1024><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        default: mixbench_kernel_fp32<1><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+    }
+}
+
+// FP64 kernel launcher
+void launch_mixbench_fp64_kernel(double* d_data, double scalar_val, int size,
+                                int grid_size, int block_size, int compute_iters,
+                                cudaStream_t stream = 0) {
+    switch (compute_iters) {
+        case 0: mixbench_kernel_fp64<0><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 1: mixbench_kernel_fp64<1><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 2: mixbench_kernel_fp64<2><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 4: mixbench_kernel_fp64<4><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 8: mixbench_kernel_fp64<8><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 16: mixbench_kernel_fp64<16><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 32: mixbench_kernel_fp64<32><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 64: mixbench_kernel_fp64<64><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 128: mixbench_kernel_fp64<128><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 256: mixbench_kernel_fp64<256><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        default: mixbench_kernel_fp64<1><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+    }
+}
+
+// FP8 kernel launcher (B100 specific)
+#if FP8_SUPPORTED
+void launch_mixbench_fp8_kernel(__nv_fp8_e4m3* d_data, float scalar_val, int size,
+                               int grid_size, int block_size, int compute_iters,
+                               cudaStream_t stream = 0) {
+    switch (compute_iters) {
+        case 0: mixbench_kernel_fp8<0><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 1: mixbench_kernel_fp8<1><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 2: mixbench_kernel_fp8<2><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 4: mixbench_kernel_fp8<4><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 8: mixbench_kernel_fp8<8><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 16: mixbench_kernel_fp8<16><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 32: mixbench_kernel_fp8<32><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        case 64: mixbench_kernel_fp8<64><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+        default: mixbench_kernel_fp8<1><<<grid_size, block_size, 0, stream>>>(d_data, scalar_val, size); break;
+    }
+}
+#endif
+
+// Tensor Core GEMM launcher
+void launch_mixbench_tensor_core_kernel(const half* d_A, const half* d_B, float* d_C,
+                                       int M, int N, int K, int compute_iters,
+                                       cudaStream_t stream = 0) {
+    // Use 16x16x16 tiles for optimal B100 performance
+    const int TILE_SIZE = 16;
+    dim3 grid((M + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
+    dim3 block(32, 4); // 128 threads per block, arranged for warp efficiency
+    
+    mixbench_tensor_core_gemm<TILE_SIZE, TILE_SIZE, TILE_SIZE>
+        <<<grid, block, 0, stream>>>(d_A, d_B, d_C, M, N, K, compute_iters);
+}
+
+// Mixed precision kernel launcher
+void launch_mixbench_mixed_precision_kernel(void* d_data, int size, int precision_type,
+                                          int compute_iters, int grid_size, int block_size,
+                                          cudaStream_t stream = 0) {
+    mixbench_mixed_precision_kernel<<<grid_size, block_size, 0, stream>>>
+        (d_data, size, precision_type, compute_iters);
+}
+
+// Memory pattern kernel launcher
+void launch_mixbench_memory_pattern_kernel(float* d_data, float scalar_val, int size,
+                                          int stride_size, int access_pattern, int compute_iters,
+                                          int grid_size, int block_size, cudaStream_t stream = 0) {
+    switch (access_pattern) {
+        case 0: mixbench_memory_pattern_kernel<1, 0><<<grid_size, block_size, 0, stream>>>
+                (d_data, scalar_val, size, stride_size); break;
+        case 1: mixbench_memory_pattern_kernel<1, 1><<<grid_size, block_size, 0, stream>>>
+                (d_data, scalar_val, size, stride_size); break;
+        case 2: mixbench_memory_pattern_kernel<1, 2><<<grid_size, block_size, 0, stream>>>
+                (d_data, scalar_val, size, stride_size); break;
+        default: mixbench_memory_pattern_kernel<1, 0><<<grid_size, block_size, 0, stream>>>
+                 (d_data, scalar_val, size, stride_size); break;
+    }
+}
+
+// Cooperative kernel launcher
+void launch_mixbench_cooperative_kernel(float* d_data, float scalar_val, int size,
+                                       int compute_iters, int grid_size, int block_size,
+                                       cudaStream_t stream = 0) {
+    mixbench_cooperative_kernel<<<grid_size, block_size, 0, stream>>>
+        (d_data, scalar_val, size, compute_iters);
+}
+
+// Utility functions
+int get_device_count() {
+    int count;
+    cudaGetDeviceCount(&count);
+    return count;
+}
+
+int get_device_properties(int device, char* name, size_t name_len, int* sm_count, 
+                         size_t* global_mem, int* compute_major, int* compute_minor) {
+    cudaDeviceProp prop;
+    cudaError_t err = cudaGetDeviceProperties(&prop, device);
+    if (err != cudaSuccess) return -1;
+    
+    strncpy(name, prop.name, name_len - 1);
+    name[name_len - 1] = '\0';
+    *sm_count = prop.multiProcessorCount;
+    *global_mem = prop.totalGlobalMem;
+    *compute_major = prop.major;
+    *compute_minor = prop.minor;
+    
+    return 0;
+}
+
+int check_b100_support(int device) {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device);
+    
+    // Check for Blackwell architecture (compute capability 9.0+)
+    if (prop.major >= 9) {
+        return 1; // B100 or similar Blackwell GPU
+    }
+    return 0; // Not a B100
+}
+
+} // extern "C"

@@ -1,0 +1,427 @@
+"""
+BabelStream GPU Kernels for Mojo
+This file contains GPU kernel implementations for the BabelStream benchmark.
+
+Note: This is a conceptual implementation showing how GPU kernels would be structured
+in Mojo. The actual GPU API is still evolving, so this serves as a template for
+when full GPU support is available.
+"""
+
+from tensor import Tensor, TensorShape
+from gpu import GPU, GPUMemory, GPUKernel
+from algorithm import parallelize
+
+# GPU Constants
+alias GPU_BLOCK_SIZE = 256
+alias GPU_THREAD_BLOCK_SIZE = 1024
+
+struct GPUStreamKernels[type: DType]:
+    """GPU kernel implementations for BabelStream"""
+    
+    @staticmethod
+    fn gpu_init_kernel(
+        a: GPUMemory[type], 
+        b: GPUMemory[type], 
+        c: GPUMemory[type],
+        size: Int,
+        init_a: Scalar[type],
+        init_b: Scalar[type], 
+        init_c: Scalar[type]
+    ):
+        """GPU kernel for array initialization"""
+        
+        @gpu.kernel
+        fn init_kernel_impl():
+            let idx = gpu.thread_idx() + gpu.block_idx() * gpu.block_dim()
+            if idx < size:
+                a[idx] = init_a
+                b[idx] = init_b
+                c[idx] = init_c
+        
+        let num_blocks = (size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE
+        gpu.launch[init_kernel_impl](num_blocks, GPU_BLOCK_SIZE)
+    
+    @staticmethod
+    fn gpu_copy_kernel(
+        a: GPUMemory[type],
+        c: GPUMemory[type], 
+        size: Int
+    ):
+        """GPU Copy kernel: c[i] = a[i]"""
+        
+        @gpu.kernel
+        fn copy_kernel_impl():
+            let idx = gpu.thread_idx() + gpu.block_idx() * gpu.block_dim()
+            if idx < size:
+                c[idx] = a[idx]
+        
+        let num_blocks = (size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE
+        gpu.launch[copy_kernel_impl](num_blocks, GPU_BLOCK_SIZE)
+    
+    @staticmethod  
+    fn gpu_mul_kernel(
+        b: GPUMemory[type],
+        c: GPUMemory[type],
+        size: Int,
+        scalar: Scalar[type]
+    ):
+        """GPU Multiply kernel: b[i] = scalar * c[i]"""
+        
+        @gpu.kernel
+        fn mul_kernel_impl():
+            let idx = gpu.thread_idx() + gpu.block_idx() * gpu.block_dim()
+            if idx < size:
+                b[idx] = scalar * c[idx]
+        
+        let num_blocks = (size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE
+        gpu.launch[mul_kernel_impl](num_blocks, GPU_BLOCK_SIZE)
+    
+    @staticmethod
+    fn gpu_add_kernel(
+        a: GPUMemory[type],
+        b: GPUMemory[type],
+        c: GPUMemory[type],
+        size: Int
+    ):
+        """GPU Add kernel: c[i] = a[i] + b[i]"""
+        
+        @gpu.kernel
+        fn add_kernel_impl():
+            let idx = gpu.thread_idx() + gpu.block_idx() * gpu.block_dim()
+            if idx < size:
+                c[idx] = a[idx] + b[idx]
+        
+        let num_blocks = (size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE
+        gpu.launch[add_kernel_impl](num_blocks, GPU_BLOCK_SIZE)
+    
+    @staticmethod
+    fn gpu_triad_kernel(
+        a: GPUMemory[type],
+        b: GPUMemory[type], 
+        c: GPUMemory[type],
+        size: Int,
+        scalar: Scalar[type]
+    ):
+        """GPU Triad kernel: a[i] = b[i] + scalar * c[i]"""
+        
+        @gpu.kernel
+        fn triad_kernel_impl():
+            let idx = gpu.thread_idx() + gpu.block_idx() * gpu.block_dim()
+            if idx < size:
+                a[idx] = b[idx] + scalar * c[idx]
+        
+        let num_blocks = (size + GPU_BLOCK_SIZE - 1) // GPU_BLOCK_SIZE
+        gpu.launch[triad_kernel_impl](num_blocks, GPU_BLOCK_SIZE)
+    
+    @staticmethod
+    fn gpu_dot_kernel(
+        a: GPUMemory[type],
+        b: GPUMemory[type],
+        partial_sums: GPUMemory[type],
+        size: Int
+    ):
+        """GPU Dot product kernel with reduction: sum = a[i] * b[i]"""
+        
+        @gpu.kernel  
+        fn dot_kernel_impl():
+            # Shared memory for block-level reduction
+            var shared_mem = gpu.shared_memory[type, GPU_THREAD_BLOCK_SIZE]()
+            
+            let tid = gpu.thread_idx()
+            let bid = gpu.block_idx()
+            let idx = tid + bid * gpu.block_dim()
+            
+            # Load data and perform multiplication
+            var sum: Scalar[type] = 0
+            if idx < size:
+                sum = a[idx] * b[idx]
+            
+            # Store in shared memory
+            shared_mem[tid] = sum
+            gpu.sync_threads()
+            
+            # Perform block-level reduction
+            var stride = gpu.block_dim() // 2
+            while stride > 0:
+                if tid < stride:
+                    shared_mem[tid] += shared_mem[tid + stride]
+                gpu.sync_threads()
+                stride //= 2
+            
+            # Store block result
+            if tid == 0:
+                partial_sums[bid] = shared_mem[0]
+        
+        let num_blocks = (size + GPU_THREAD_BLOCK_SIZE - 1) // GPU_THREAD_BLOCK_SIZE
+        gpu.launch[dot_kernel_impl](num_blocks, GPU_THREAD_BLOCK_SIZE)
+
+struct AdvancedGPUStream[type: DType]:
+    """Advanced GPU Stream implementation with optimized kernels"""
+    var array_size: Int
+    var device_id: Int
+    var gpu_a: GPUMemory[type]
+    var gpu_b: GPUMemory[type] 
+    var gpu_c: GPUMemory[type]
+    var gpu_partial_sums: GPUMemory[type]
+    var num_blocks: Int
+    
+    fn __init__(inout self, array_size: Int, device_id: Int = 0):
+        self.array_size = array_size
+        self.device_id = device_id
+        self.num_blocks = (array_size + GPU_THREAD_BLOCK_SIZE - 1) // GPU_THREAD_BLOCK_SIZE
+        
+        # Allocate GPU memory
+        gpu.set_device(device_id)
+        self.gpu_a = gpu.malloc[type](array_size)
+        self.gpu_b = gpu.malloc[type](array_size)
+        self.gpu_c = gpu.malloc[type](array_size)
+        self.gpu_partial_sums = gpu.malloc[type](self.num_blocks)
+        
+        self.init_arrays()
+    
+    fn __del__(owned self):
+        """Clean up GPU memory"""
+        gpu.free(self.gpu_a)
+        gpu.free(self.gpu_b)
+        gpu.free(self.gpu_c)
+        gpu.free(self.gpu_partial_sums)
+    
+    fn init_arrays(self):
+        """Initialize GPU arrays"""
+        GPUStreamKernels[type].gpu_init_kernel(
+            self.gpu_a, self.gpu_b, self.gpu_c,
+            self.array_size,
+            0.1, 0.2, 0.0  # INIT_A, INIT_B, INIT_C
+        )
+        gpu.synchronize()
+        
+        return gpu.get_time() - start_time
+    
+    fn dot(self) -> Tuple[Float64, Float64]:
+        """GPU optimized dot product with reduction"""
+        let start_time = gpu.get_time()
+        
+        # Launch dot kernel
+        GPUStreamKernels[type].gpu_dot_kernel(
+            self.gpu_a, self.gpu_b, self.gpu_partial_sums, self.array_size
+        )
+        gpu.synchronize()
+        
+        # Copy partial sums back to host and reduce
+        var host_partial_sums = Tensor[type](TensorShape(self.num_blocks))
+        gpu.memcpy_device_to_host(host_partial_sums.data(), self.gpu_partial_sums, self.num_blocks)
+        
+        var total_sum: Float64 = 0.0
+        for i in range(self.num_blocks):
+            total_sum += Float64(host_partial_sums[i])
+        
+        let elapsed_time = gpu.get_time() - start_time
+        return (elapsed_time, total_sum)
+    
+    fn get_device_info(self) -> String:
+        """Get GPU device information"""
+        return gpu.get_device_name(self.device_id)
+
+# GPU utility functions
+fn list_gpu_devices():
+    """List available GPU devices"""
+    let device_count = gpu.get_device_count()
+    print("Available GPU devices:")
+    for i in range(device_count):
+        let device_name = gpu.get_device_name(i)
+        let device_memory = gpu.get_device_memory(i)
+        print("  Device", i, ":", device_name, "(" + str(device_memory // (1024*1024)) + " MB)")
+
+fn select_best_gpu_device() -> Int:
+    """Select the GPU device with the most memory"""
+    let device_count = gpu.get_device_count()
+    if device_count == 0:
+        print("No GPU devices found!")
+        return -1
+    
+    var best_device = 0
+    var best_memory = gpu.get_device_memory(0)
+    
+    for i in range(1, device_count):
+        let memory = gpu.get_device_memory(i)
+        if memory > best_memory:
+            best_memory = memory
+            best_device = i
+    
+    return best_device
+
+# Performance optimization utilities
+struct GPUTuningParameters:
+    """GPU tuning parameters for different architectures"""
+    var block_size: Int
+    var grid_size_multiplier: Int
+    var shared_memory_size: Int
+    var use_texture_memory: Bool
+    
+    fn __init__(inout self, device_id: Int):
+        # Auto-tune based on device capabilities
+        let compute_capability = gpu.get_compute_capability(device_id)
+        let max_threads_per_block = gpu.get_max_threads_per_block(device_id)
+        let shared_memory_per_block = gpu.get_shared_memory_per_block(device_id)
+        
+        # Set optimal parameters based on GPU architecture
+        if compute_capability >= 8.0:  # Ampere and newer
+            self.block_size = 1024
+            self.grid_size_multiplier = 8
+            self.shared_memory_size = min(shared_memory_per_block, 49152)
+            self.use_texture_memory = True
+        elif compute_capability >= 7.0:  # Volta/Turing
+            self.block_size = 512
+            self.grid_size_multiplier = 4
+            self.shared_memory_size = min(shared_memory_per_block, 32768)
+            self.use_texture_memory = True
+        else:  # Pascal and older
+            self.block_size = 256
+            self.grid_size_multiplier = 2
+            self.shared_memory_size = min(shared_memory_per_block, 16384)
+            self.use_texture_memory = False
+
+# Memory coalescing optimization
+struct CoalescedMemoryAccess[type: DType]:
+    """Optimized memory access patterns for GPU"""
+    
+    @staticmethod
+    fn optimized_copy_kernel(
+        src: GPUMemory[type],
+        dst: GPUMemory[type],
+        size: Int,
+        tuning: GPUTuningParameters
+    ):
+        """Memory-coalesced copy kernel"""
+        
+        @gpu.kernel
+        fn coalesced_copy():
+            let tid = gpu.thread_idx()
+            let bid = gpu.block_idx()
+            let block_size = tuning.block_size
+            
+            # Process multiple elements per thread for better memory throughput
+            let elements_per_thread = 4
+            let base_idx = (bid * block_size + tid) * elements_per_thread
+            
+            if base_idx < size:
+                # Vectorized load/store for better memory bandwidth
+                let vec_src = gpu.load_vector[type, 4](src + base_idx)
+                gpu.store_vector[type, 4](dst + base_idx, vec_src)
+        
+        let num_blocks = (size + tuning.block_size * 4 - 1) // (tuning.block_size * 4)
+        gpu.launch[coalesced_copy](num_blocks, tuning.block_size)
+
+# Benchmark utilities for GPU
+fn benchmark_gpu_memory_bandwidth(device_id: Int, array_size: Int) -> Float64:
+    """Benchmark raw GPU memory bandwidth"""
+    gpu.set_device(device_id)
+    
+    let src = gpu.malloc[DType.float64](array_size)
+    let dst = gpu.malloc[DType.float64](array_size)
+    
+    # Warm up
+    gpu.memcpy(dst, src, array_size)
+    gpu.synchronize()
+    
+    let num_iterations = 100
+    let start_time = gpu.get_time()
+    
+    for _ in range(num_iterations):
+        gpu.memcpy(dst, src, array_size)
+    
+    gpu.synchronize()
+    let elapsed_time = gpu.get_time() - start_time
+    
+    gpu.free(src)
+    gpu.free(dst)
+    
+    let bytes_transferred = Float64(array_size * sizeof[DType.float64]() * num_iterations)
+    return (bytes_transferred / 1e9) / elapsed_time  # GB/s
+
+# Multi-GPU support
+struct MultiGPUStream[type: DType]:
+    """Multi-GPU implementation for large arrays"""
+    var num_devices: Int
+    var array_size_per_device: Int
+    var gpu_streams: DynamicVector[AdvancedGPUStream[type]]
+    
+    fn __init__(inout self, total_array_size: Int):
+        self.num_devices = gpu.get_device_count()
+        self.array_size_per_device = total_array_size // self.num_devices
+        self.gpu_streams = DynamicVector[AdvancedGPUStream[type]](capacity=self.num_devices)
+        
+        # Initialize streams on each GPU
+        for device_id in range(self.num_devices):
+            var stream = AdvancedGPUStream[type](self.array_size_per_device, device_id)
+            self.gpu_streams.push_back(stream^)
+    
+    fn multi_gpu_triad(self) -> Float64:
+        """Execute triad kernel across multiple GPUs"""
+        var max_time: Float64 = 0.0
+        
+        # Launch kernels on all GPUs
+        for i in range(self.num_devices):
+            let time = self.gpu_streams[i].triad()
+            if time > max_time:
+                max_time = time
+        
+        return max_time
+    
+    fn multi_gpu_dot(self) -> Tuple[Float64, Float64]:
+        """Execute dot product across multiple GPUs"""
+        var max_time: Float64 = 0.0
+        var total_sum: Float64 = 0.0
+        
+        for i in range(self.num_devices):
+            let result = self.gpu_streams[i].dot()
+            let time = result[0]
+            let partial_sum = result[1]
+            
+            if time > max_time:
+                max_time = time
+            total_sum += partial_sum
+        
+        return (max_time, total_sum).synchronize()
+    
+    fn copy(self) -> Float64:
+        """GPU optimized copy kernel"""
+        let start_time = gpu.get_time()
+        
+        GPUStreamKernels[type].gpu_copy_kernel(
+            self.gpu_a, self.gpu_c, self.array_size
+        )
+        gpu.synchronize()
+        
+        return gpu.get_time() - start_time
+    
+    fn mul(self) -> Float64:
+        """GPU optimized multiply kernel"""  
+        let start_time = gpu.get_time()
+        
+        GPUStreamKernels[type].gpu_mul_kernel(
+            self.gpu_b, self.gpu_c, self.array_size, 0.4  # SCALAR_VALUE
+        )
+        gpu.synchronize()
+        
+        return gpu.get_time() - start_time
+    
+    fn add(self) -> Float64:
+        """GPU optimized add kernel"""
+        let start_time = gpu.get_time()
+        
+        GPUStreamKernels[type].gpu_add_kernel(
+            self.gpu_a, self.gpu_b, self.gpu_c, self.array_size
+        )
+        gpu.synchronize()
+        
+        return gpu.get_time() - start_time
+    
+    fn triad(self) -> Float64:
+        """GPU optimized triad kernel"""
+        let start_time = gpu.get_time()
+        
+        GPUStreamKernels[type].gpu_triad_kernel(
+            self.gpu_a, self.gpu_b, self.gpu_c, self.array_size, 0.4
+        )
+        gpu

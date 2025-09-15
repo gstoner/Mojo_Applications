@@ -1,0 +1,215 @@
+"""
+Configuration file for Mixbench-Mojo
+Allows easy customization of benchmark parameters without modifying the main code
+"""
+
+# Benchmark Configuration Constants
+alias CONFIG_DEFAULT_BUFFER_SIZE_MB = 256
+alias CONFIG_ELEMENTS_PER_THREAD = 8
+alias CONFIG_FUSION_DEGREE = 4
+alias CONFIG_BLOCK_SIZE = 256
+alias CONFIG_MIN_ITERATIONS = 10
+alias CONFIG_MAX_ITERATIONS = 1000
+alias CONFIG_WARMUP_ITERATIONS = 5
+alias CONFIG_BENCHMARK_RUNS = 10
+
+# Compute iteration patterns for operational intensity sweep
+# These values determine the compute-to-memory ratio tested
+alias CONFIG_COMPUTE_ITERATIONS = List[Int](
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 128, 192, 256
+)
+
+# Extended compute iterations for deep analysis (uncomment to use)
+# alias CONFIG_COMPUTE_ITERATIONS_EXTENDED = List[Int](
+#     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+#     22, 24, 26, 28, 30, 32, 36, 40, 44, 48, 52, 56, 60, 64, 72, 80, 88, 96,
+#     112, 128, 144, 160, 176, 192, 224, 256, 320, 384, 448, 512
+# )
+
+# Data type configuration
+struct DataTypeConfig:
+    """Configuration for different data types in benchmarks"""
+    var name: String
+    var size_bytes: Int
+    var enabled: Bool
+    
+    fn __init__(inout self, name: String, size_bytes: Int, enabled: Bool = True):
+        self.name = name
+        self.size_bytes = size_bytes
+        self.enabled = enabled
+
+# Configure which data types to benchmark
+fn get_data_type_configs() -> List[DataTypeConfig]:
+    var configs = List[DataTypeConfig]()
+    configs.append(DataTypeConfig("Float32", 4, True))
+    configs.append(DataTypeConfig("Float64", 8, True))  
+    configs.append(DataTypeConfig("Int32", 4, True))
+    # configs.append(DataTypeConfig("Float16", 2, False))  # Enable when supported
+    # configs.append(DataTypeConfig("Int64", 8, False))    # Enable when needed
+    return configs
+
+# Performance measurement configuration
+struct MeasurementConfig:
+    """Configuration for performance measurement parameters"""
+    var timing_precision: String  # "microseconds", "milliseconds", "seconds"
+    var statistical_runs: Int     # Number of runs for statistical analysis
+    var outlier_removal: Bool     # Remove statistical outliers
+    var confidence_level: Float64 # Confidence level for error bars (0.95 = 95%)
+    
+    fn __init__(inout self, timing_precision: String = "milliseconds", 
+                statistical_runs: Int = 10, outlier_removal: Bool = True,
+                confidence_level: Float64 = 0.95):
+        self.timing_precision = timing_precision
+        self.statistical_runs = statistical_runs
+        self.outlier_removal = outlier_removal
+        self.confidence_level = confidence_level
+
+# Output configuration
+struct OutputConfig:
+    """Configuration for benchmark output format"""
+    var csv_output: Bool          # Enable CSV output
+    var json_output: Bool         # Enable JSON output  
+    var verbose_output: Bool      # Enable verbose logging
+    var save_raw_data: Bool       # Save raw timing measurements
+    var plot_results: Bool        # Generate performance plots (future feature)
+    
+    fn __init__(inout self, csv_output: Bool = True, json_output: Bool = False,
+                verbose_output: Bool = False, save_raw_data: Bool = False,
+                plot_results: Bool = False):
+        self.csv_output = csv_output
+        self.json_output = json_output
+        self.verbose_output = verbose_output
+        self.save_raw_data = save_raw_data
+        self.plot_results = plot_results
+
+# System optimization configuration
+struct SystemConfig:
+    """Configuration for system-level optimizations"""
+    var cpu_affinity: Bool        # Set CPU affinity for consistent performance
+    var disable_turbo: Bool       # Disable CPU turbo boost for stable clocks
+    var memory_prefetch: Bool     # Enable memory prefetching optimizations
+    var numa_awareness: Bool      # NUMA-aware memory allocation
+    
+    fn __init__(inout self, cpu_affinity: Bool = False, disable_turbo: Bool = False,
+                memory_prefetch: Bool = True, numa_awareness: Bool = False):
+        self.cpu_affinity = cpu_affinity
+        self.disable_turbo = disable_turbo
+        self.memory_prefetch = memory_prefetch
+        self.numa_awareness = numa_awareness
+
+# Validation configuration
+struct ValidationConfig:
+    """Configuration for benchmark result validation"""
+    var enable_correctness_check: Bool  # Verify computational correctness
+    var tolerance: Float64              # Numerical tolerance for FP comparisons
+    var checksum_validation: Bool       # Use checksums to verify data integrity
+    
+    fn __init__(inout self, enable_correctness_check: Bool = False,
+                tolerance: Float64 = 1e-6, checksum_validation: Bool = False):
+        self.enable_correctness_check = enable_correctness_check
+        self.tolerance = tolerance
+        self.checksum_validation = checksum_validation
+
+# Main configuration structure
+struct MixbenchConfig:
+    """Main configuration structure for Mixbench-Mojo"""
+    var measurement: MeasurementConfig
+    var output: OutputConfig
+    var system: SystemConfig
+    var validation: ValidationConfig
+    var buffer_size_mb: Int
+    var custom_label: String      # Custom label for this benchmark run
+    
+    fn __init__(inout self, buffer_size_mb: Int = CONFIG_DEFAULT_BUFFER_SIZE_MB,
+                custom_label: String = ""):
+        self.measurement = MeasurementConfig()
+        self.output = OutputConfig()
+        self.system = SystemConfig()
+        self.validation = ValidationConfig()
+        self.buffer_size_mb = buffer_size_mb
+        self.custom_label = custom_label
+
+# Default configuration factory
+fn create_default_config() -> MixbenchConfig:
+    """Create a default configuration for standard benchmarking"""
+    return MixbenchConfig()
+
+fn create_quick_config() -> MixbenchConfig:
+    """Create a configuration for quick testing (reduced parameters)"""
+    var config = MixbenchConfig(64)  # Smaller buffer for faster execution
+    config.measurement.statistical_runs = 3
+    config.output.verbose_output = True
+    return config
+
+fn create_research_config() -> MixbenchConfig:
+    """Create a configuration for research-grade benchmarking"""
+    var config = MixbenchConfig(512)  # Large buffer for comprehensive testing
+    config.measurement.statistical_runs = 20
+    config.measurement.outlier_removal = True
+    config.validation.enable_correctness_check = True
+    config.output.save_raw_data = True
+    return config
+
+fn create_production_config() -> MixbenchConfig:
+    """Create a configuration for production system characterization"""
+    var config = MixbenchConfig(256)
+    config.system.cpu_affinity = True
+    config.system.disable_turbo = True  # For stable, repeatable results
+    config.measurement.statistical_runs = 15
+    config.validation.enable_correctness_check = True
+    return config
+
+# Environment detection helpers
+fn detect_optimal_buffer_size() -> Int:
+    """Detect optimal buffer size based on system memory"""
+    # This would typically query system memory and set buffer size
+    # to a fraction of available memory (e.g., 25% of RAM)
+    # For now, return conservative default
+    return CONFIG_DEFAULT_BUFFER_SIZE_MB
+
+fn detect_system_capabilities() -> SystemConfig:
+    """Detect system capabilities and return appropriate system config"""
+    var config = SystemConfig()
+    
+    # Here you would detect:
+    # - Number of NUMA nodes
+    # - CPU features (AVX, etc.)  
+    # - Memory hierarchy (L1/L2/L3 cache sizes)
+    # - Turbo boost availability
+    
+    return config
+
+# Configuration validation
+fn validate_config(config: MixbenchConfig) raises:
+    """Validate configuration parameters for correctness and feasibility"""
+    if config.buffer_size_mb <= 0:
+        raise Error("Buffer size must be positive")
+    
+    if config.measurement.statistical_runs <= 0:
+        raise Error("Statistical runs must be positive")
+        
+    if config.measurement.confidence_level <= 0.0 or config.measurement.confidence_level >= 1.0:
+        raise Error("Confidence level must be between 0 and 1")
+    
+    # Add more validation as needed
+    print("Configuration validated successfully")
+
+# Example usage in main benchmark code:
+"""
+fn main():
+    # Load configuration
+    var config = create_default_config()
+    # Or: var config = create_research_config() 
+    # Or: var config = create_quick_config()
+    
+    # Validate configuration
+    try:
+        validate_config(config)
+    except e:
+        print("Configuration error:", e)
+        return
+    
+    # Run benchmark with configuration
+    run_mixed_benchmark_suite(config)
+"""

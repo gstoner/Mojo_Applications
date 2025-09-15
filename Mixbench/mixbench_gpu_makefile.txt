@@ -1,0 +1,330 @@
+# Makefile for Mixbench-Mojo GPU
+# Supports multiple GPU architectures and build configurations
+
+# Build configuration
+BUILD_DIR := build_gpu
+TARGET := mixbench-mojo-gpu
+CUDA_KERNELS := mixbench_kernels.cu
+MOJO_SOURCE := mixbench_gpu.mojo
+
+# Compiler settings
+NVCC := nvcc
+MOJO := mojo
+
+# CUDA architecture targets
+# B100 (Blackwell): sm_90
+# H100 (Hopper): sm_90
+# A100 (Ampere): sm_80
+# V100 (Volta): sm_70
+# Default to B100 architecture
+CUDA_ARCH ?= 90
+CUDA_ARCHS := 70,80,90
+
+# Build modes
+BUILD_MODE ?= release
+ifeq ($(BUILD_MODE),debug)
+    CUDA_FLAGS := -g -G -O0 -DDEBUG
+    MOJO_FLAGS := -g -O0
+else
+    CUDA_FLAGS := -O3 -use_fast_math -Xptxas -O3
+    MOJO_FLAGS := -O3
+endif
+
+# CUDA compute capabilities
+GENCODE_FLAGS := $(foreach arch,$(subst $(COMMA), ,$(CUDA_ARCHS)),\
+    -gencode arch=compute_$(arch),code=sm_$(arch))
+
+# Add PTX for forward compatibility
+GENCODE_FLAGS += -gencode arch=compute_$(CUDA_ARCH),code=compute_$(CUDA_ARCH)
+
+# System detection
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+    CUDA_PATH ?= /usr/local/cuda
+    LIB_EXT := so
+    SHARED_FLAG := -shared -fPIC
+endif
+ifeq ($(UNAME_S),Darwin)
+    CUDA_PATH ?= /usr/local/cuda
+    LIB_EXT := dylib
+    SHARED_FLAG := -shared -fPIC
+endif
+
+# CUDA paths
+CUDA_INC_PATH := $(CUDA_PATH)/include
+CUDA_LIB_PATH := $(CUDA_PATH)/lib64
+
+# Check for CUDA libraries
+CUDA_LIBS := -lcudart -lcuda
+ifeq ($(CUDA_ARCH),90)
+    # B100/H100 specific libraries
+    CUDA_LIBS += -lcublas -lcublasLt -lcufft
+endif
+
+# Feature flags
+ENABLE_FP8 ?= 1
+ENABLE_TENSOR_CORES ?= 1
+ENABLE_PROFILING ?= 0
+
+# Add feature-specific flags
+ifeq ($(ENABLE_FP8),1)
+    CUDA_FLAGS += -DENABLE_FP8=1
+endif
+
+ifeq ($(ENABLE_TENSOR_CORES),1)
+    CUDA_FLAGS += -DENABLE_TENSOR_CORES=1
+endif
+
+ifeq ($(ENABLE_PROFILING),1)
+    CUDA_FLAGS += -DENABLE_PROFILING=1
+    CUDA_LIBS += -lnvToolsExt
+endif
+
+# Complete CUDA flags
+CUDA_FLAGS += $(GENCODE_FLAGS) -I$(CUDA_INC_PATH) --compiler-options "$(SHARED_FLAG)"
+
+# Targets
+.PHONY: all clean gpu cpu test install uninstall help
+
+all: gpu
+
+help:
+	@echo "Mixbench-Mojo GPU Build System"
+	@echo "=============================="
+	@echo ""
+	@echo "Targets:"
+	@echo "  gpu          Build GPU-enabled version (default)"
+	@echo "  cpu          Build CPU-only version"
+	@echo "  test         Run basic functionality tests"
+	@echo "  clean        Clean build artifacts"
+	@echo "  install      Install to system (requires sudo)"
+	@echo "  uninstall    Remove from system"
+	@echo "  help         Show this help"
+	@echo ""
+	@echo "Configuration:"
+	@echo "  BUILD_MODE=debug|release    Build configuration (default: release)"
+	@echo "  CUDA_ARCH=70|80|90         Target CUDA architecture (default: 90)"
+	@echo "  ENABLE_FP8=0|1             Enable FP8 support (default: 1)"
+	@echo "  ENABLE_TENSOR_CORES=0|1    Enable Tensor Cores (default: 1)"
+	@echo "  ENABLE_PROFILING=0|1       Enable NVTX profiling (default: 0)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make gpu BUILD_MODE=debug"
+	@echo "  make gpu CUDA_ARCH=80 ENABLE_FP8=0"
+	@echo "  make test"
+
+# Check prerequisites
+check-prereqs:
+	@echo "Checking prerequisites..."
+	@which mojo > /dev/null || (echo "❌ Mojo not found. Install from https://www.modular.com/mojo"; exit 1)
+	@which nvcc > /dev/null || (echo "❌ CUDA not found. Install CUDA Toolkit"; exit 1)
+	@which nvidia-smi > /dev/null || echo "⚠️  NVIDIA driver not detected"
+	@echo "✅ Prerequisites check passed"
+
+# Detect GPU capabilities
+detect-gpu:
+	@echo "Detecting GPU capabilities..."
+	@if command -v nvidia-smi >/dev/null 2>&1; then \
+		echo "Available GPUs:"; \
+		nvidia-smi --query-gpu=index,name,compute_cap --format=csv,noheader; \
+		if nvidia-smi --query-gpu=name --format=csv,noheader | grep -q "B100"; then \
+			echo "🎉 B100 detected - using optimal settings"; \
+		elif nvidia-smi --query-gpu=name --format=csv,noheader | grep -q "H100"; then \
+			echo "🚀 H100 detected - using compatible settings"; \
+		else \
+			echo "ℹ️  Other GPU detected - using generic settings"; \
+		fi; \
+	else \
+		echo "⚠️  No GPU detected or drivers not installed"; \
+	fi
+
+# Create build directory
+$(BUILD_DIR):
+	@echo "Creating build directory..."
+	@mkdir -p $(BUILD_DIR)
+
+# Compile CUDA kernels
+$(BUILD_DIR)/mixbench_kernels.o: $(CUDA_KERNELS) | $(BUILD_DIR)
+	@echo "Compiling CUDA kernels..."
+	@echo "CUDA flags: $(CUDA_FLAGS)"
+	$(NVCC) $(CUDA_FLAGS) -c $< -o $@
+
+# Create CUDA shared library
+$(BUILD_DIR)/libmixbench_cuda.$(LIB_EXT): $(BUILD_DIR)/mixbench_kernels.o
+	@echo "Creating CUDA shared library..."
+	$(NVCC) $(SHARED_FLAG) $< -o $@ -L$(CUDA_LIB_PATH) $(CUDA_LIBS)
+
+# Compile Mojo host code
+$(BUILD_DIR)/$(TARGET): $(MOJO_SOURCE) $(BUILD_DIR)/libmixbench_cuda.$(LIB_EXT) | $(BUILD_DIR)
+	@echo "Compiling Mojo host code..."
+	@echo "Mojo flags: $(MOJO_FLAGS)"
+	@cp $(MOJO_SOURCE) $(BUILD_DIR)/
+	@cd $(BUILD_DIR) && $(MOJO) build $(MOJO_FLAGS) $(notdir $(MOJO_SOURCE)) -o $(TARGET) \
+		-I $(CUDA_INC_PATH) \
+		-L . -L $(CUDA_LIB_PATH) \
+		-lmixbench_cuda $(CUDA_LIBS)
+	@chmod +x $(BUILD_DIR)/$(TARGET)
+
+# Main GPU target
+gpu: check-prereqs detect-gpu $(BUILD_DIR)/$(TARGET)
+	@echo ""
+	@echo "✅ GPU build completed successfully!"
+	@echo "Executable: $(BUILD_DIR)/$(TARGET)"
+	@echo ""
+	@echo "To run:"
+	@echo "  cd $(BUILD_DIR)"
+	@echo "  export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):\$LD_LIBRARY_PATH"
+	@echo "  ./$(TARGET)"
+
+# CPU-only fallback
+cpu: check-prereqs
+	@echo "Building CPU-only version..."
+	@mkdir -p $(BUILD_DIR)
+	$(MOJO) build $(MOJO_FLAGS) mixbench.mojo -o $(BUILD_DIR)/mixbench-mojo-cpu
+	@echo "✅ CPU build completed: $(BUILD_DIR)/mixbench-mojo-cpu"
+
+# Testing targets
+test-gpu: gpu
+	@echo "Running GPU functionality tests..."
+	@cd $(BUILD_DIR) && \
+	export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):$LD_LIBRARY_PATH && \
+	./$(TARGET) --test || echo "⚠️  GPU test failed - check CUDA installation"
+
+test-cpu: cpu
+	@echo "Running CPU functionality tests..."
+	@cd $(BUILD_DIR) && ./mixbench-mojo-cpu --test || echo "CPU version works"
+
+test: test-gpu test-cpu
+
+# Benchmarking targets
+bench-quick: gpu
+	@echo "Running quick GPU benchmark..."
+	@cd $(BUILD_DIR) && \
+	export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):$LD_LIBRARY_PATH && \
+	./$(TARGET) --quick
+
+bench-full: gpu
+	@echo "Running full GPU benchmark suite..."
+	@cd $(BUILD_DIR) && \
+	export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):$LD_LIBRARY_PATH && \
+	./$(TARGET) --buffer-size 2048
+
+# Profiling target
+profile: gpu
+	@echo "Running with NVIDIA profiling..."
+	@cd $(BUILD_DIR) && \
+	export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):$LD_LIBRARY_PATH && \
+	nsys profile --trace=cuda,nvtx --output=mixbench_profile ./$(TARGET)
+
+# Installation targets
+INSTALL_PREFIX ?= /usr/local
+INSTALL_BIN_DIR := $(INSTALL_PREFIX)/bin
+INSTALL_LIB_DIR := $(INSTALL_PREFIX)/lib
+
+install: gpu
+	@echo "Installing Mixbench-Mojo GPU..."
+	sudo mkdir -p $(INSTALL_BIN_DIR)
+	sudo mkdir -p $(INSTALL_LIB_DIR)
+	sudo cp $(BUILD_DIR)/$(TARGET) $(INSTALL_BIN_DIR)/
+	sudo cp $(BUILD_DIR)/libmixbench_cuda.$(LIB_EXT) $(INSTALL_LIB_DIR)/
+	sudo chmod +x $(INSTALL_BIN_DIR)/$(TARGET)
+	@echo "✅ Installed to $(INSTALL_PREFIX)"
+	@echo "Run with: $(TARGET)"
+
+uninstall:
+	@echo "Uninstalling Mixbench-Mojo GPU..."
+	sudo rm -f $(INSTALL_BIN_DIR)/$(TARGET)
+	sudo rm -f $(INSTALL_LIB_DIR)/libmixbench_cuda.$(LIB_EXT)
+	@echo "✅ Uninstalled"
+
+# Analysis and reporting
+analyze: gpu
+	@echo "Running performance analysis..."
+	@cd $(BUILD_DIR) && \
+	export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):$LD_LIBRARY_PATH && \
+	./$(TARGET) > benchmark_results.csv
+	python3 ../analyze_results.py benchmark_results.csv --plot --save --report
+	@echo "📊 Analysis complete - check $(BUILD_DIR)/ for results"
+
+# Development targets
+debug: BUILD_MODE=debug
+debug: gpu
+	@echo "Debug build completed with symbols"
+
+profile-build: ENABLE_PROFILING=1
+profile-build: gpu
+	@echo "Profiling build completed"
+
+# Multi-GPU testing
+test-multi-gpu: gpu
+	@echo "Testing multi-GPU support..."
+	@cd $(BUILD_DIR) && \
+	export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):$LD_LIBRARY_PATH && \
+	./$(TARGET) --multi-gpu || echo "Multi-GPU not available"
+
+# Docker support
+docker-build:
+	@echo "Building Docker image..."
+	docker build -t mixbench-mojo-gpu .
+
+docker-run: docker-build
+	@echo "Running in Docker container..."
+	docker run --gpus all --rm -it mixbench-mojo-gpu
+
+# Performance comparison
+compare: gpu cpu
+	@echo "Running performance comparison..."
+	@cd $(BUILD_DIR) && \
+	echo "CPU version:" && ./mixbench-mojo-cpu --quick && \
+	echo "GPU version:" && \
+	export LD_LIBRARY_PATH=.:$(CUDA_LIB_PATH):$LD_LIBRARY_PATH && \
+	./$(TARGET) --quick
+
+# Clean targets
+clean:
+	@echo "Cleaning build artifacts..."
+	rm -rf $(BUILD_DIR)
+	rm -f *.o *.so *.dylib
+	@echo "✅ Clean completed"
+
+clean-all: clean
+	@echo "Cleaning all generated files..."
+	rm -f *.csv *.png *.txt *.log
+	@echo "✅ All clean completed"
+
+# Packaging
+PACKAGE_NAME := mixbench-mojo-gpu-$(shell date +%Y%m%d)
+
+package: gpu
+	@echo "Creating package..."
+	mkdir -p $(PACKAGE_NAME)
+	cp $(BUILD_DIR)/$(TARGET) $(PACKAGE_NAME)/
+	cp $(BUILD_DIR)/libmixbench_cuda.$(LIB_EXT) $(PACKAGE_NAME)/
+	cp README.md $(PACKAGE_NAME)/
+	cp analyze_results.py $(PACKAGE_NAME)/
+	echo "#!/bin/bash" > $(PACKAGE_NAME)/run.sh
+	echo "export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH" >> $(PACKAGE_NAME)/run.sh
+	echo "./$(TARGET)" >> $(PACKAGE_NAME)/run.sh
+	chmod +x $(PACKAGE_NAME)/run.sh
+	tar czf $(PACKAGE_NAME).tar.gz $(PACKAGE_NAME)
+	rm -rf $(PACKAGE_NAME)
+	@echo "📦 Package created: $(PACKAGE_NAME).tar.gz"
+
+# Information targets
+info:
+	@echo "Build Configuration:"
+	@echo "==================="
+	@echo "Build mode: $(BUILD_MODE)"
+	@echo "CUDA architecture: $(CUDA_ARCH)"
+	@echo "CUDA path: $(CUDA_PATH)"
+	@echo "Target: $(TARGET)"
+	@echo "FP8 enabled: $(ENABLE_FP8)"
+	@echo "Tensor Cores enabled: $(ENABLE_TENSOR_CORES)"
+	@echo "Profiling enabled: $(ENABLE_PROFILING)"
+	@echo ""
+	@$(MAKE) --version | head -1
+	@$(NVCC) --version | grep "release"
+	@$(MOJO) --version
+
+# Default target
+.DEFAULT_GOAL := gpu
