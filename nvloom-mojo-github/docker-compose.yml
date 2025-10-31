@@ -1,0 +1,152 @@
+version: '3.8'
+
+services:
+  nvloom:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nvloom-mojo:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ./results:/opt/nvloom/results
+      - ./data:/opt/nvloom/data
+    networks:
+      - nvloom-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  nvloom-mpi-master:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nvloom-mojo:latest
+    runtime: nvidia
+    hostname: nvloom-master
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMPI_MCA_btl_base_warn_component_unused=0
+    volumes:
+      - ./results:/opt/nvloom/results
+      - ./data:/opt/nvloom/data
+      - ssh-keys:/root/.ssh
+    networks:
+      - nvloom-net
+    ports:
+      - "2222:22"
+    command: ["bash", "-c", "service ssh start && tail -f /dev/null"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
+  nvloom-mpi-worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nvloom-mojo:latest
+    runtime: nvidia
+    hostname: nvloom-worker-1
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=1
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMPI_MCA_btl_base_warn_component_unused=0
+    volumes:
+      - ./results:/opt/nvloom/results
+      - ./data:/opt/nvloom/data
+      - ssh-keys:/root/.ssh
+    networks:
+      - nvloom-net
+    command: ["bash", "-c", "service ssh start && tail -f /dev/null"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+
+  nvloom-mpi-worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nvloom-mojo:latest
+    runtime: nvidia
+    hostname: nvloom-worker-2
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=2
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMPI_MCA_btl_base_warn_component_unused=0
+    volumes:
+      - ./results:/opt/nvloom/results
+      - ./data:/opt/nvloom/data
+      - ssh-keys:/root/.ssh
+    networks:
+      - nvloom-net
+    command: ["bash", "-c", "service ssh start && tail -f /dev/null"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+
+  nvloom-mpi-worker-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nvloom-mojo:latest
+    runtime: nvidia
+    hostname: nvloom-worker-3
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=3
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OMPI_MCA_btl_base_warn_component_unused=0
+    volumes:
+      - ./results:/opt/nvloom/results
+      - ./data:/opt/nvloom/data
+      - ssh-keys:/root/.ssh
+    networks:
+      - nvloom-net
+    command: ["bash", "-c", "service ssh start && tail -f /dev/null"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['3']
+              capabilities: [gpu]
+
+  visualization:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nvloom-mojo:latest
+    environment:
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ./results:/opt/nvloom/results
+      - ./plots:/opt/nvloom/plots
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    networks:
+      - nvloom-net
+    command: ["bash"]
+
+networks:
+  nvloom-net:
+    driver: bridge
+
+volumes:
+  ssh-keys:
